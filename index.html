@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Kamen Ranger — E-Bike Range Calculator</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    body { margin: 0; background: #0d0f14; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    const CURRENCY = {
+      usd: { symbol: "$",  label: "USD", defaultRate: 0.12 },
+      php: { symbol: "₱", label: "PHP", defaultRate: 6.50  },
+    };
+
+    const defaults = {
+      capacity:    10,
+      voltage:     48,
+      chargingAmps: 2,
+      motorWatts:  250,
+      weight:      25,
+      riderWeight: 70,
+      terrain:     "flat",
+      avgSpeedKmh: 25,
+      costPerKwh:  0.12,
+      currency:    "usd",
+      regen:       "none",
+      bmsMin:      15,
+      bmsMax:      95,
+    };
+
+    const terrainParams = {
+      flat:    { label: "Flat Road",         Crr: 0.008, netGrade: 0.000 },
+      hilly:   { label: "Hilly / Mixed",     Crr: 0.010, netGrade: 0.015 },
+      offroad: { label: "Off-Road / Rough",  Crr: 0.020, netGrade: 0.005 },
+    };
+
+    const regenParams = {
+      none:  { label: "None",  flatBoost: 0.00, hillyBoost: 0.00 },
+      light: { label: "Light", flatBoost: 0.05, hillyBoost: 0.12 },
+      heavy: { label: "Heavy", flatBoost: 0.10, hillyBoost: 0.22 },
+    };
+
+    const g   = 9.81;
+    const rho = 1.225;
+    const CdA = 0.55;
+    const eta = 0.85 * 0.80;
+
+    function calcWhPerKm(speedKmh, totalKg, terrain) {
+      const v = speedKmh / 3.6;
+      const { Crr, netGrade } = terrainParams[terrain];
+      const P_roll  = Crr * totalKg * g * v;
+      const P_aero  = 0.5 * rho * CdA * v * v * v;
+      const P_grade = totalKg * g * netGrade * v;
+      const P_elec  = (P_roll + P_aero + P_grade) / eta;
+      return { WhPerKm: P_elec / speedKmh, P_roll, P_aero, P_elec };
+    }
+
+    function maxSpeedKmh(motorWatts, totalKg, terrain) {
+      let lo = 1, hi = 120;
+      for (let i = 0; i < 60; i++) {
+        const mid = (lo + hi) / 2;
+        calcWhPerKm(mid, totalKg, terrain).P_elec < motorWatts ? (lo = mid) : (hi = mid);
+      }
+      return Math.round((lo + hi) / 2);
+    }
+
+    function fmt(n, digits = 4) { return Number(n).toFixed(digits); }
+
+    function Knob({ label, unit, value, min, max, step, onChange, color }) {
+      return (
+        <div className="input-group">
+          <label>{label}</label>
+          <div className="input-row">
+            <input type="range" min={min} max={max} step={step} value={value}
+              onChange={e => onChange(Number(e.target.value))}
+              style={{ "--accent": color }} />
+            <input type="number" min={min} max={max} step={step} value={value}
+              onChange={e => onChange(Number(e.target.value))}
+              className="num-input" />
+            <span className="unit">{unit}</span>
+          </div>
+        </div>
+      );
+    }
+
+    function BmsSlider({ minVal, maxVal, onChange }) {
+      const trackRef = useRef(null);
+      const drag     = useRef(null);
+      const clamp    = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+      const valFromX = clientX => {
+        if (!trackRef.current) return 0;
+        const r = trackRef.current.getBoundingClientRect();
+        return clamp(Math.round(((clientX - r.left) / r.width) * 100), 0, 100);
+      };
+
+      const onDown = handle => e => {
+        e.currentTarget.setPointerCapture(e.pointerId);
+        drag.current = handle;
+      };
+
+      const onMove = e => {
+        if (!drag.current) return;
+        const v = valFromX(e.clientX);
+        drag.current === "min"
+          ? onChange(clamp(v, 0, maxVal - 5), maxVal)
+          : onChange(minVal, clamp(v, minVal + 5, 100));
+      };
+
+      const onUp = () => { drag.current = null; };
+
+      const handle = (side, color, val) => (
+        <div
+          onPointerDown={onDown(side)}
+          style={{
+            position:"absolute", top:"50%", left:`${val}%`,
+            transform:"translate(-50%,-50%)",
+            width:18, height:18, borderRadius:"50%",
+            background: color, cursor:"grab", touchAction:"none",
+            boxShadow:`0 0 8px ${color}`, border:"2px solid var(--bg)", zIndex:2,
+          }}
+        />
+      );
+
+      return (
+        <div style={{ padding:"0.4rem 0 0.6rem" }}>
+          <div style={{ display:"flex", justifyContent:"space-between", marginBottom:"0.6rem" }}>
+            <span style={{ fontSize:"0.68rem", color:"var(--red)" }}>Floor <strong>{minVal}%</strong></span>
+            <span style={{ fontSize:"0.68rem", color:"var(--blue)" }}>Window <strong>{maxVal - minVal}%</strong></span>
+            <span style={{ fontSize:"0.68rem", color:"var(--green)" }}>Ceil <strong>{maxVal}%</strong></span>
+          </div>
+          <div ref={trackRef} onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={onUp}
+            style={{ position:"relative", height:22, userSelect:"none" }}>
+            <div style={{
+              position:"absolute", top:"50%", transform:"translateY(-50%)",
+              left:0, right:0, height:6, background:"var(--border)", borderRadius:3,
+            }} />
+            <div style={{
+              position:"absolute", top:"50%", transform:"translateY(-50%)",
+              left:`${minVal}%`, width:`${maxVal - minVal}%`, height:6,
+              background:"linear-gradient(90deg,var(--red),var(--green))",
+              borderRadius:3, boxShadow:"0 0 8px rgba(0,229,160,0.25)",
+            }} />
+            {handle("min", "var(--red)",   minVal)}
+            {handle("max", "var(--green)", maxVal)}
+          </div>
+          <div style={{ display:"flex", justifyContent:"space-between", marginTop:"0.35rem" }}>
+            {[0,25,50,75,100].map(t => (
+              <span key={t} style={{ fontSize:"0.55rem", color:"var(--muted)" }}>{t}%</span>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    function EBikeRangeCalc() {
+      const [vals, setVals]           = useState(defaults);
+      const [results, setResults]     = useState(null);
+      const [animKey, setAnimKey]     = useState(0);
+      const [speedWarn, setSpeedWarn] = useState(false);
+
+      const set = key => v => setVals(p => ({ ...p, [key]: v }));
+
+      const setCurrency = key => setVals(p => ({
+        ...p, currency: key, costPerKwh: CURRENCY[key].defaultRate,
+      }));
+
+      useEffect(() => {
+        const {
+          capacity, voltage, motorWatts, weight, riderWeight,
+          terrain, avgSpeedKmh, chargingAmps, costPerKwh, regen,
+          bmsMin, bmsMax, currency,
+        } = vals;
+
+        const sym        = CURRENCY[currency].symbol;
+        const totalKg    = weight + riderWeight;
+        const totalWh    = capacity * voltage;
+        const bmsWindow  = (bmsMax - bmsMin) / 100;
+        const usableWh   = totalWh * bmsWindow;
+        const vMax       = maxSpeedKmh(motorWatts, totalKg, terrain);
+        const speed      = Math.min(avgSpeedKmh, vMax);
+        setSpeedWarn(avgSpeedKmh > vMax);
+
+        const { WhPerKm, P_roll, P_aero, P_elec } = calcWhPerKm(speed, totalKg, terrain);
+
+        const { flatBoost, hillyBoost } = regenParams[regen];
+        const regenBoost       = flatBoost + (hillyBoost - flatBoost) * (terrain === "flat" ? 0 : 1);
+        const regenWhRecovered = usableWh * regenBoost;
+        const rangeKm          = (usableWh / WhPerKm) * (1 + regenBoost);
+        const rangeMi          = rangeKm * 0.621371;
+        const rideHrs          = rangeKm / speed;
+        const chargeTimeHrs    = (capacity * bmsWindow) / chargingAmps;
+        const chargeCost       = (usableWh / 1000) * costPerKwh;
+
+        const pTotal  = P_roll + P_aero;
+
+        setResults({
+          sym,
+          rangeKm:        fmt(rangeKm, 1),
+          rangeMi:        fmt(rangeMi, 1),
+          totalWh:        fmt(totalWh, 0),
+          usableWh:       fmt(usableWh, 0),
+          bmsWindowPct:   fmt(bmsWindow * 100, 0),
+          WhPerKm:        fmt(WhPerKm, 1),
+          WhPerMi:        fmt(WhPerKm * 1.60934, 1),
+          P_mech:         fmt(P_elec, 0),
+          vMax,
+          vMaxMph:        fmt(vMax * 0.621371, 1),
+          chargeTimeHrs:  fmt(chargeTimeHrs, 1),
+          rideHrs:        fmt(rideHrs, 1),
+          speed,
+          speedMph:       fmt(speed * 0.621371, 1),
+          rollPct:        pTotal > 0 ? fmt((P_roll / pTotal) * 100, 0) : 0,
+          aeroPct:        pTotal > 0 ? fmt((P_aero / pTotal) * 100, 0) : 0,
+          chargeCost:     fmt(chargeCost, currency === "php" ? 2 : 4),
+          costPerKm:      fmt(chargeCost / rangeKm, currency === "php" ? 2 : 4),
+          costPerMi:      fmt(chargeCost / rangeMi, currency === "php" ? 2 : 4),
+          regenBoostPct:  fmt(regenBoost * 100, 0),
+          regenWhRecovered: fmt(regenWhRecovered, 0),
+        });
+        setAnimKey(k => k + 1);
+      }, [vals]);
+
+      const rangePct = results ? Math.min((parseFloat(results.rangeKm) / 80) * 100, 100) : 0;
+      const barColor = rangePct > 60 ? "#00e5a0" : rangePct > 30 ? "#f5c842" : "#ff4d6a";
+      const sym      = CURRENCY[vals.currency].symbol;
+
+      const costMax  = vals.currency === "php" ? 20.00 : 1.00;
+      const costStep = vals.currency === "php" ? 0.50  : 0.01;
+
+      return (
+        <div className="app">
+          <style>{`
+            @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Mono:wght@300;400;500&display=swap');
+            *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+            :root{
+              --bg:#0d0f14;--panel:#13161e;--border:#1f2430;
+              --text:#cdd6f4;--muted:#6c7086;
+              --green:#00e5a0;--yellow:#f5c842;--red:#ff4d6a;
+              --blue:#7aa2f7;--purple:#bb9af7;
+            }
+            body{background:var(--bg)}
+            .app{
+              min-height:100vh;background:var(--bg);color:var(--text);
+              font-family:'DM Mono',monospace;padding:2rem 1rem;
+              display:flex;flex-direction:column;align-items:center;gap:2rem;
+            }
+            .header{text-align:center}
+            .header h1{
+              font-family:'Bebas Neue',sans-serif;
+              font-size:clamp(2.5rem,8vw,4.5rem);letter-spacing:.08em;
+              background:linear-gradient(135deg,var(--green),var(--blue));
+              -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+              background-clip:text;line-height:1;
+            }
+            .header p{font-size:.75rem;color:var(--muted);letter-spacing:.2em;text-transform:uppercase;margin-top:.4rem}
+            .grid{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;width:100%;max-width:860px}
+            @media(max-width:600px){.grid{grid-template-columns:1fr}}
+            .panel{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:1.5rem}
+            .panel-title{font-size:.65rem;letter-spacing:.25em;text-transform:uppercase;color:var(--muted);margin-bottom:1.25rem;padding-bottom:.75rem;border-bottom:1px solid var(--border)}
+            .input-group{margin-bottom:1.1rem}
+            .input-group label{display:block;font-size:.7rem;color:var(--muted);letter-spacing:.1em;margin-bottom:.4rem;text-transform:uppercase}
+            .input-row{display:flex;align-items:center;gap:.6rem}
+            input[type=range]{flex:1;appearance:none;height:4px;background:var(--border);border-radius:2px;outline:none;cursor:pointer}
+            input[type=range]::-webkit-slider-thumb{
+              appearance:none;width:14px;height:14px;border-radius:50%;
+              background:var(--accent,var(--green));cursor:pointer;
+              box-shadow:0 0 8px var(--accent,var(--green));transition:transform .1s;
+            }
+            input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.3)}
+            .num-input{
+              width:62px;background:var(--bg);border:1px solid var(--border);
+              border-radius:6px;color:var(--text);font-family:'DM Mono',monospace;
+              font-size:.8rem;padding:.3rem .4rem;text-align:right;outline:none;transition:border-color .2s;
+            }
+            .num-input:focus{border-color:var(--green)}
+            .unit{font-size:.65rem;color:var(--muted);width:38px;flex-shrink:0}
+            .terrain-group{display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.4rem}
+            .terrain-btn{
+              flex:1;min-width:80px;background:var(--bg);border:1px solid var(--border);
+              border-radius:8px;color:var(--muted);font-family:'DM Mono',monospace;
+              font-size:.65rem;letter-spacing:.05em;padding:.6rem .5rem;
+              cursor:pointer;text-align:center;transition:all .2s;
+            }
+            .terrain-btn.active{border-color:var(--green);color:var(--green);background:rgba(0,229,160,.08);box-shadow:0 0 12px rgba(0,229,160,.15)}
+            .currency-row{display:flex;gap:.5rem;margin-top:.4rem}
+            .currency-btn{
+              flex:1;background:var(--bg);border:1px solid var(--border);border-radius:8px;
+              color:var(--muted);font-family:'DM Mono',monospace;font-size:.75rem;
+              padding:.5rem;cursor:pointer;text-align:center;transition:all .2s;letter-spacing:.05em;
+            }
+            .currency-btn.active{border-color:var(--yellow);color:var(--yellow);background:rgba(245,200,66,.08);box-shadow:0 0 12px rgba(245,200,66,.15)}
+            .warn{
+              display:flex;align-items:center;gap:.5rem;
+              background:rgba(255,77,106,.12);border:1px solid var(--red);
+              border-radius:8px;padding:.6rem .9rem;
+              font-size:.68rem;color:var(--red);margin-top:.75rem;line-height:1.5;
+            }
+            .results-panel{grid-column:1/-1;background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:1.5rem}
+            .range-hero{text-align:center;padding:1rem 0 1.5rem}
+            .range-label{font-size:.65rem;letter-spacing:.25em;color:var(--muted);text-transform:uppercase}
+            .range-value{font-family:'Bebas Neue',sans-serif;font-size:clamp(4rem,15vw,7rem);line-height:1;letter-spacing:.05em;transition:color .4s}
+            .range-sub{font-size:.8rem;color:var(--muted);margin-top:.2rem}
+            .bar-track{width:100%;height:8px;background:var(--border);border-radius:4px;overflow:hidden;margin:1rem 0 1.5rem}
+            .bar-fill{height:100%;border-radius:4px;transition:width .5s cubic-bezier(.22,1,.36,1),background .4s;box-shadow:0 0 10px currentColor}
+            .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:.75rem}
+            .stat-card{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:.9rem}
+            .stat-label{font-size:.6rem;letter-spacing:.15em;text-transform:uppercase;color:var(--muted);margin-bottom:.3rem}
+            .stat-value{font-size:1.1rem;font-weight:500;letter-spacing:.05em}
+            .stat-unit{font-size:.65rem;color:var(--muted);margin-left:.2rem}
+            .stat-sub{font-size:.7rem;color:var(--muted);margin-top:.2rem}
+            .cost-box{margin-top:1rem;background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:1rem}
+            .cost-row{display:flex;gap:1rem;flex-wrap:wrap;align-items:center}
+            .cost-item{flex:1;min-width:100px}
+            .cost-item-label{font-size:.6rem;color:var(--muted);text-transform:uppercase;letter-spacing:.12em;margin-bottom:.2rem}
+            .cost-item-value{font-family:'Bebas Neue',sans-serif;font-size:2rem;line-height:1}
+            .cost-item-sub{font-size:.65rem;color:var(--muted);margin-top:.15rem}
+            .regen-badge{
+              display:inline-flex;align-items:center;gap:.4rem;
+              margin-top:.75rem;background:rgba(245,200,66,.1);
+              border:1px solid rgba(245,200,66,.4);border-radius:20px;
+              padding:.3rem .8rem;font-size:.7rem;color:var(--yellow);
+            }
+            .loss-wrap{margin-top:1.25rem}
+            .loss-label{font-size:.62rem;color:var(--muted);letter-spacing:.15em;text-transform:uppercase;margin-bottom:.5rem}
+            .loss-bar{display:flex;height:10px;border-radius:5px;overflow:hidden;gap:2px}
+            .loss-seg{height:100%;transition:width .5s ease}
+            .loss-legend{display:flex;gap:1.2rem;margin-top:.5rem;font-size:.62rem;color:var(--muted)}
+            .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px;vertical-align:middle}
+            .note{margin-top:1rem;font-size:.63rem;color:var(--muted);border-top:1px solid var(--border);padding-top:.75rem;line-height:1.7}
+            @keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+            .anim{animation:fadeUp .3s ease}
+          `}</style>
+
+          <div className="header">
+            <h1>Kamen Ranger</h1>
+            <p>Mini Electric Bike &middot; Physics-Based Range Estimator</p>
+          </div>
+
+          <div className="grid">
+
+            {/* Battery Specs */}
+            <div className="panel">
+              <div className="panel-title">&#9889; Battery Specs</div>
+              <Knob label="Battery Capacity" unit="Ah"
+                value={vals.capacity} min={2} max={40} step={0.5}
+                onChange={set("capacity")} color="var(--green)" />
+              <Knob label="Voltage" unit="V"
+                value={vals.voltage} min={24} max={72} step={12}
+                onChange={set("voltage")} color="var(--blue)" />
+              <Knob label="Charging Amps" unit="A"
+                value={vals.chargingAmps} min={1} max={10} step={0.5}
+                onChange={set("chargingAmps")} color="var(--purple)" />
+
+              <div className="input-group">
+                <label>Currency</label>
+                <div className="currency-row">
+                  {Object.entries(CURRENCY).map(([key, c]) => (
+                    <button key={key}
+                      className={`currency-btn ${vals.currency === key ? "active" : ""}`}
+                      onClick={() => setCurrency(key)}>
+                      {c.symbol} {c.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <Knob label="Electricity Cost" unit={`${sym}/kWh`}
+                value={vals.costPerKwh} min={0.01} max={costMax} step={costStep}
+                onChange={set("costPerKwh")} color="var(--yellow)" />
+
+              <div className="input-group" style={{ marginBottom:0 }}>
+                <label>BMS Charge Window</label>
+                <BmsSlider
+                  minVal={vals.bmsMin}
+                  maxVal={vals.bmsMax}
+                  onChange={(lo, hi) => setVals(p => ({ ...p, bmsMin: lo, bmsMax: hi }))}
+                />
+              </div>
+            </div>
+
+            {/* Motor & Load */}
+            <div className="panel">
+              <div className="panel-title">&#9881; Motor &amp; Load</div>
+              <Knob label="Motor Wattage"   unit="W"
+                value={vals.motorWatts} min={100} max={3000} step={50}
+                onChange={set("motorWatts")} color="var(--yellow)" />
+              <Knob label="Bike Net Weight" unit="kg"
+                value={vals.weight} min={5} max={80} step={0.5}
+                onChange={set("weight")} color="var(--red)" />
+              <Knob label="Rider Weight"    unit="kg"
+                value={vals.riderWeight} min={30} max={150} step={1}
+                onChange={set("riderWeight")} color="var(--red)" />
+            </div>
+
+            {/* Riding Conditions */}
+            <div className="panel">
+              <div className="panel-title">&#127937; Riding Conditions</div>
+
+              <Knob label="Average Speed" unit="km/h"
+                value={vals.avgSpeedKmh} min={5} max={60} step={1}
+                onChange={set("avgSpeedKmh")} color="var(--green)" />
+
+              {speedWarn && results && (
+                <div className="warn">
+                  &#9888; Motor tops out at {results.vMax} km/h ({results.vMaxMph} mph) here. Speed capped.
+                </div>
+              )}
+
+              <div className="input-group" style={{ marginTop:"1rem" }}>
+                <label>Terrain Type</label>
+                <div className="terrain-group">
+                  {Object.entries(terrainParams).map(([key, t]) => (
+                    <button key={key}
+                      className={`terrain-btn ${vals.terrain === key ? "active" : ""}`}
+                      onClick={() => set("terrain")(key)}>
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="input-group" style={{ marginTop:"1rem" }}>
+                <label>Regen Braking</label>
+                <div className="terrain-group">
+                  {Object.entries(regenParams).map(([key, r]) => (
+                    <button key={key}
+                      className={`terrain-btn ${vals.regen === key ? "active" : ""}`}
+                      style={vals.regen === key ? { borderColor:"var(--yellow)", color:"var(--yellow)", background:"rgba(245,200,66,.08)", boxShadow:"0 0 12px rgba(245,200,66,.15)" } : {}}
+                      onClick={() => set("regen")(key)}>
+                      {r.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Battery Details */}
+            <div className="panel">
+              <div className="panel-title">&#128267; Battery Details</div>
+              {results && (
+                <div className="stats-grid" key={animKey + "b"} style={{ marginTop:".5rem" }}>
+                  <div className="stat-card anim">
+                    <div className="stat-label">Total Energy</div>
+                    <div className="stat-value" style={{ color:"var(--blue)" }}>
+                      {results.totalWh}<span className="stat-unit">Wh</span>
+                    </div>
+                  </div>
+                  <div className="stat-card anim">
+                    <div className="stat-label">Usable ({results.bmsWindowPct}%)</div>
+                    <div className="stat-value" style={{ color:"var(--green)" }}>
+                      {results.usableWh}<span className="stat-unit">Wh</span>
+                    </div>
+                  </div>
+                  <div className="stat-card anim">
+                    <div className="stat-label">Charge Time</div>
+                    <div className="stat-value" style={{ color:"var(--purple)" }}>
+                      {results.chargeTimeHrs}<span className="stat-unit">hrs</span>
+                    </div>
+                  </div>
+                  <div className="stat-card anim">
+                    <div className="stat-label">Motor Top Speed</div>
+                    <div className="stat-value" style={{ color:"var(--yellow)" }}>
+                      {results.vMax}<span className="stat-unit">km/h</span>
+                    </div>
+                    <div className="stat-sub">{results.vMaxMph} mph</div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Results */}
+            {results && (
+              <div className="results-panel" key={animKey}>
+                <div className="panel-title">&#128205; Estimated Range</div>
+
+                <div className="range-hero">
+                  <div className="range-label">Estimated Range</div>
+                  <div style={{ display:"flex", justifyContent:"center", alignItems:"baseline", gap:"1.5rem", flexWrap:"wrap" }}>
+                    <div className="range-value" style={{ color: barColor }}>
+                      {results.rangeKm}
+                      <span style={{ fontSize:"2rem", color:"var(--muted)" }}>km</span>
+                    </div>
+                    <div style={{ fontFamily:"'Bebas Neue',sans-serif", fontSize:"clamp(2rem,7vw,3.5rem)", color:"var(--muted)", lineHeight:1 }}>
+                      {results.rangeMi}
+                      <span style={{ fontSize:"1.2rem", color:"var(--border)" }}>mi</span>
+                    </div>
+                  </div>
+                  <div className="range-sub">
+                    {results.rideHrs} hrs &middot; BMS {vals.bmsMin}%&ndash;{vals.bmsMax}% &middot; {terrainParams[vals.terrain].label}
+                  </div>
+                  {vals.regen !== "none" && (
+                    <div className="regen-badge">
+                      &#9889; {regenParams[vals.regen].label} regen +{results.regenBoostPct}% &middot; +{results.regenWhRecovered} Wh recovered
+                    </div>
+                  )}
+                </div>
+
+                <div className="bar-track">
+                  <div className="bar-fill" style={{ width:`${rangePct}%`, background:barColor, color:barColor }} />
+                </div>
+
+                <div className="stats-grid">
+                  <div className="stat-card">
+                    <div className="stat-label">Consumption</div>
+                    <div className="stat-value" style={{ color:"var(--yellow)" }}>
+                      {results.WhPerKm}<span className="stat-unit">Wh/km</span>
+                    </div>
+                    <div className="stat-sub">{results.WhPerMi} Wh/mi</div>
+                  </div>
+                  <div className="stat-card">
+                    <div className="stat-label">Motor Draw</div>
+                    <div className="stat-value" style={{ color:"var(--blue)" }}>
+                      {results.P_mech}<span className="stat-unit">W</span>
+                    </div>
+                  </div>
+                  <div className="stat-card">
+                    <div className="stat-label">Total Load</div>
+                    <div className="stat-value" style={{ color:"var(--red)" }}>
+                      {vals.weight + vals.riderWeight}<span className="stat-unit">kg</span>
+                    </div>
+                  </div>
+                  <div className="stat-card">
+                    <div className="stat-label">Avg Speed</div>
+                    <div className="stat-value" style={{ color:"var(--green)" }}>
+                      {results.speed}<span className="stat-unit">km/h</span>
+                    </div>
+                    <div className="stat-sub">{results.speedMph} mph</div>
+                  </div>
+                </div>
+
+                <div className="cost-box">
+                  <div style={{ fontSize:".62rem", letterSpacing:".2em", textTransform:"uppercase", color:"var(--muted)", marginBottom:".75rem" }}>
+                    &#128176; Charging Cost ({CURRENCY[vals.currency].label})
+                  </div>
+                  <div className="cost-row">
+                    <div className="cost-item">
+                      <div className="cost-item-label">Per Charge</div>
+                      <div className="cost-item-value" style={{ color:"var(--yellow)" }}>
+                        {sym}{results.chargeCost}
+                      </div>
+                      <div className="cost-item-sub">{results.usableWh} Wh @ {sym}{vals.costPerKwh}/kWh</div>
+                    </div>
+                    <div className="cost-item">
+                      <div className="cost-item-label">Per km</div>
+                      <div className="cost-item-value" style={{ color:"var(--green)" }}>
+                        {sym}{results.costPerKm}
+                      </div>
+                    </div>
+                    <div className="cost-item">
+                      <div className="cost-item-label">Per mile</div>
+                      <div className="cost-item-value" style={{ color:"var(--purple)" }}>
+                        {sym}{results.costPerMi}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="loss-wrap">
+                  <div className="loss-label">Resistance Breakdown at Speed</div>
+                  <div className="loss-bar">
+                    <div className="loss-seg" style={{ width:`${results.rollPct}%`, background:"var(--green)" }} />
+                    <div className="loss-seg" style={{ width:`${results.aeroPct}%`, background:"var(--blue)" }} />
+                  </div>
+                  <div className="loss-legend">
+                    <span><span className="dot" style={{ background:"var(--green)" }} />Rolling {results.rollPct}%</span>
+                    <span><span className="dot" style={{ background:"var(--blue)" }} />Aero {results.aeroPct}%</span>
+                  </div>
+                </div>
+
+                <div className="note">
+                  Physics model: rolling resistance + aerodynamic drag (CdA 0.55 m&#178;) + grade climbing.
+                  Drivetrain (85%) x electrical (80%) = 68% combined efficiency.
+                  Regen at 65% round-trip efficiency.
+                  BMS window {vals.bmsMin}%&ndash;{vals.bmsMax}% ({results.bmsWindowPct}% usable).
+                  Real-world range varies with wind, battery age, temperature and stop-start riding.
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<EBikeRangeCalc />);
+  </script>
+</body>
+</html>
